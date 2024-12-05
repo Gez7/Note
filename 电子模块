@@ -1,0 +1,137 @@
+ 工作电压：DC 3V ~ 5.5V (不同的厂家不同) 
+工作电流：5.3ma 
+探测距离： 2cm - 600 cm 
+核心是两个超声波传感器，一个用作发射器（T），将电信号转换为40 KHz超声波脉冲。一个用于接收器（R）  监听发射的脉冲。
+需要关注的是 #测量范围 
+（触发）控制端：Trig       （超声波信号输出）输出端：Echo
+距离 = （发送时刻 - 接收时刻） * 声速 / 2  
+一般来说，在常规温度情况下，距离 = (高电平时间 * 340m/s)  / 2    
+可知高电平最高持续66ms 转换单位：340m/s = 0.032 cm/us
+***注：在计数频率为1MHz的情况下，每1us加一个值，则直接提取高电平持续时间的计数器值，即可知道高电平持续时间，注意单位：us 
+在这个前提下，距离 = 高电平持续时间的计数器值 *  0.034 / 2 为了保证精准度，计5个值求平均以减少误差***
+
+**不确定因数是音速，不同温度下，音速不同，要精准测距，则需要进行温度补偿** 
+
+# 机理
+通过GPIO口向Trig引脚输入一个持续10us以上的高电平信号，传感器就会以40KHz的频率发送8个声音脉冲（相当于每25us发送一次脉冲）这种8脉冲模式使得接收器能够将发送模式与环境超声噪音区分开，八个超声波脉冲通过空气传播，远离发射器。同时(8*40KHz = 200us后)，Echo(回声)引脚变为高电平，开始形成回声信号的开始。
+1. 如果这些脉冲没有被反射回来，则回波信号将在66ms后返回低电平（这意味着Echo端的高电平宽度约为66ms,最多就只能测到66ms）
+2. 如果这些脉冲被反射回去，则在收到信号后，Echo引脚就会变低。这会产生一个脉冲，其宽度取决于接收信号所花费的时间
+
+   
+通过GPIO口向Trig引脚**发送**一个脉冲信号（电平拉高再拉低），超声波模块**接收**到脉冲信号后就会向外发送一段超声波，跟着Echo端将电平拉高，当模块接收到反射回来的超声波后，模块便将Echo拉低 
+所以Echo端高电平持续的时间就是超声波在往返途中消耗的时间
+
+使用定时器的输入捕获模式，当读取到GPIO口是高电平时，就操作定时器开始计数
+					    当读取到GPIO口是低电平时，就读取定时器的数值
+
+
+# 最新版
+简单来说，对于超声波模块
+特点：
+1. 引脚
+		【VCC GND】(供电)
+		Trig ---  触发引脚
+		Echo --接收引脚
+2. 工作方式
+		1.给Trig引脚输入10us以上的脉冲触发信号（持续10us以上的高电平持续时间）
+		2.然后超声波模块就会发出8个40KHz的周期电平（超声波），
+		3.超声波发出后，模块会将Echo端引脚拉高，等到模块接收到反射回来的超声波后，模块会将Echo拉低
+		4.这就是一次超声波发送接收的总过程
+3. 测距关键
+		Echo端高电平持续时间**就是**超声波在往返途中消耗的时间
+
+测距程序机理
+1.给Trig引脚发送启动信号
+例：
+```
+// 启动超声波
+void Echo_Start(void)
+{
+	GPIO_SetBits(GPIOA,Trig);
+	Delay_us(50);
+	GPIO_ResetBits(GPIOA,Trig);
+}
+```
+2. 当开始发送超声波时，定时器开始计时（固定频率 ） 以10us为例
+定时器配置
+```
+	RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM2,ENABLE);
+	
+	TIM_TimeBaseInitTypeDef TIM_TimeBaseInitStructure;	// 时基单元初始化
+	TIM_TimeBaseInitStructure.TIM_ClockDivision = TIM_CKD_DIV1;
+	TIM_TimeBaseInitStructure.TIM_CounterMode = TIM_CounterMode_Up;
+	TIM_TimeBaseInitStructure.TIM_Period = 10 - 1;				// 10us 
+	TIM_TimeBaseInitStructure.TIM_Prescaler = 72 - 1;
+	TIM_TimeBaseInitStructure.TIM_RepetitionCounter = 0;
+	TIM_TimeBaseInit(TIM2,&TIM_TimeBaseInitStructure);
+	
+	TIM_ClearITPendingBit(TIM2,TIM_IT_Update);
+	TIM_ITConfig(TIM2,TIM_IT_Update,ENABLE);
+
+	// 不要忘记中断分组，这里没有写
+	NVIC_InitTypeDef NVIC_InitStructure;						//定义结构体，配置中断优先级
+	NVIC_InitStructure.NVIC_IRQChannel = TIM2_IRQn;				//指定中断通道
+	NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;				//中断使能
+	NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 2;	//设置抢占优先级
+	NVIC_InitStructure.NVIC_IRQChannelSubPriority = 2;			//设置响应优先级
+	NVIC_Init(&NVIC_InitStructure);
+		
+	TIM_Cmd(TIM2,ENABLE);
+
+
+	// 定时器中断函数
+	void TIM2_IRQHandler(void)			//更新中断函数，用来计时，每10微秒变量time加1
+	{
+		if (TIM_GetITStatus(TIM2, TIM_IT_Update) == SET)		//获取TIM3定时器的更新中断标志位
+		{
+			time++;
+			
+			TIM_ClearITPendingBit(TIM2, TIM_IT_Update);			//清除更新中断标志位
+		}
+	}
+```
+3. 测距主函数
+```
+//	测量开始
+uint16_t Echo_Measure(void)
+{
+	float Distance,Distance_mm = 0;
+	
+	Echo_Start();
+	
+	while(GPIO_ReadInputDataBit(GPIOA,Echo) == 0);		// 等待超声波发送开始
+	time = 0;
+	TIM_SetCounter(TIM2,0);                             // 清空定时器的计数器
+	while(GPIO_ReadInputDataBit(GPIOA,Echo) == 1);		// 等待超声波接收完毕
+	time_end = time;									// time以us为单位 time每经过10us加一次值，所以实际的时间值需要乘于10
+														// 66ms 为超声波能测量的最大值,超过即可视为超时
+	if(time_end/100.0 <= 66)		                       //  要求超声波一来一回的时间不超过66ms
+	{
+		Distance = (time_end * 340) / 2;               // 单位转换： 声速340m/s -> 340000 mm / 1000 ms = 340 mm/ms
+		Distance_mm = Distance / 100;                  // 再一次单位转换 ms -> us 由于Distance的单位没化完，所以再除以100 将ms化为us
+	}	
+		
+
+	return Distance_mm;                    // 结束
+	
+}
+```
+
+4. 求取精确的结果
+```
+		distance = Echo_Measure();		// 毫米
+		
+		num += 1;
+		sum += distance;
+		
+		if(num > 5)
+		{
+			num = 0;
+			OLED_ShowNum(2,1,(sum / 5)/10,2);    // 除于10 化为 cm
+			sum = 0;
+		}
+		
+//		OLED_ShowNum(2,1,distance/10,2);   // 可有可没有
+		
+		Delay_ms(100);
+```
